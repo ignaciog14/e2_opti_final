@@ -1,6 +1,6 @@
 """
 Comentaris para hacer:
-1. Umax no se esta utilizando.
+1. Umax no se esta utilizando. / Solucionado
 
 
 
