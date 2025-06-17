@@ -136,6 +136,9 @@ Hrn = {(row["regador"], row["zona"]): row["costo_activacion (Hrn)"] for _, row i
 
 # Regadores iniciales
 Rrn = {(row["regador"], row["zona"]): row["cantidad_inicial (Rrn)"] for _, row in iniciales_df.iterrows()}
+print("\nValidación de regadores iniciales:")
+for (r, n), val in Rrn.items():
+    print(f"Regador {r} en zona {n}: {val} unidades")
 
 # Capacidad máxima de agua por hora capacidad_litros (Dt)
 
@@ -143,8 +146,8 @@ Dt = dict(zip(capacidad_df["hora"], capacidad_df["capacidad_litros (Dt)"]))
 
 # Parámetros globales
 K = 2       # Costo por litro de agua
-Mbig = 1000   # Valor grande para restricciones
-U = 5       # Días para instalación
+Mbig = 100000   # Valor grande para restricciones
+U = 2       # Días para instalación
 U_minus = 1  # Días para remoción
 
 
@@ -200,14 +203,13 @@ print("\nVariables de decisión creadas")
 
 # FUNCIÓN OBJETIVO -----------------------------------------------------
 # Minimizar costos totales: instalación, remoción, mantenimiento, activación, agua y errores
-obj = quicksum(
-    V[r,n,d] * Cr[r] +                  # Costo de comprar regadores
-    V_minus[r,n,d] * Sr[r] +            # Costo de remover regadores
-    Y[r,n,d] * Er[r] +                  # Costo de mantenimiento
-    Z[r,n,t,d] * Hrn[r,n] +             # Costo de activación
-    X[n,r,t,d] * K +                    # Costo del agua utilizada
-    W[n,t,d] * Carean[n]                # Costo por errores de riego
-    for r in R for n in N for t in T for d in D
+obj = (
+    quicksum(V[r,n,d] * Cr[r] for r in R for n in N for d in D) +                  # Instalación
+    quicksum(V_minus[r,n,d] * Sr[r] for r in R for n in N for d in D) +            # Remoción
+    quicksum(Y[r,n,d] * Er[r] for r in R for n in N for d in D) +                  # Mantenimiento
+    quicksum(Z[r,n,t,d] * Hrn[r,n] for r in R for n in N for t in T for d in D) +  # Activación
+    quicksum(X[n,r,t,d] * K for n in N for r in R for t in T for d in D) +         # Agua
+    quicksum(W[n,t,d] * Carean[n] for n in N for t in T for d in D)                # Errores
 )
 
 m.setObjective(obj, GRB.MINIMIZE)
@@ -240,13 +242,13 @@ m.addConstrs(
 # 4. Balance de agua para t=0, d > 0
 m.addConstrs(
     (I[n,0,d] == quicksum(X[n,r,23,d-1] * βr[r] for r in R) + I[n,23,d-1] - Jn[n]
-    for n in N for d in D if d > 1),
+    for n in N for d in D if d > 0),
     name="water_balance_d>0"
 )
 
 # 5. Condición inicial de agua (d=0, t=0)
 m.addConstrs(
-    (I[n,0,1] == quicksum(X[n,r,0,1] * βr[r] for r in R) - Jn[n] + Qn[n]
+    (I[n,0,0] == quicksum(X[n,r,0,0] * βr[r] for r in R) - Jn[n] + Qn[n]
     for n in N),
     name="initial_water"
 )
@@ -268,14 +270,14 @@ m.addConstrs(
 # 8. Control de inventario de regadores (para d >= U)
 m.addConstrs(
     (Y[r,n,d] == Y[r,n,d-1] + V[r,n,d-U] - V_minus[r,n,d-U_minus]
-    for r in R for n in N for d in D if d > U),
+    for r in R for n in N for d in D if d >= U),
     name="inventory_control_d>=U"
 )
 
 # 9. Control de inventario de regadores (para U_minus <= d < U)
 m.addConstrs(
     (Y[r,n,d] == Y[r,n,d-1] - V_minus[r,n,d-U_minus]
-    for r in R for n in N for d in D if U_minus < d < U),
+    for r in R for n in N for d in D if U_minus <= d < U),
     name="inventory_control_Uminus<=d<U"
 )
 
@@ -300,28 +302,21 @@ m.addConstrs(
     name="regador_capacity"
 )
 
-# 13. Restricción de capacidad total de agua por hora
-m.addConstrs(
-    (quicksum(X[n,r,t,d] for n in N for r in R) <= Dt[t]
-    for t in T for d in D),
-    name="total_water_capacity"
-)
-
-# 14. Definir variable G (si se riega en zona n a hora t en día d)
+# 13. Definir variable G (si se riega en zona n a hora t en día d)
 m.addConstrs(
     (quicksum(Z[r,n,t,d] for r in R) <= Mbig * G[n,t,d]
     for n in N for t in T for d in D),
     name="define_G"
 )
 
-# 15. Garantizar que el área regada cubra al menos el área necesaria
+# 14. Garantizar que el área regada cubra al menos el área necesaria
 m.addConstrs(
     (quicksum(Y[r,n,d] * Fr[r] for r in R) >= An[n] * G[n,t,d]
     for n in N for t in T for d in D),
     name="area_coverage"
 )
 
-# 16. No superar horas máximas consecutivas de riego por zona
+# 15. No superar horas máximas consecutivas de riego por zona
 for n in N:
     max_horas = int(Ln[n])
     for d in D:
@@ -332,7 +327,7 @@ for n in N:
                 name=f"max_consec_hours_{n}_{t}_{d}"
             )
 
-# Restricción 17: No superar las horas máximas consecutivas de riego entre días
+# Restricción 16: No superar las horas máximas consecutivas de riego entre días
 m.addConstrs(
     (quicksum(G[n,k,d] for k in range(23 - int(Ln[n]) + t, 24)) + 
      quicksum(G[n,k,d+1] for k in range(0, t+2)) <= int(Ln[n])
@@ -340,7 +335,7 @@ m.addConstrs(
     name="max_consecutive_hours_cross_days"
 )
 
-# Restricción 18: Capacidad máxima del sistema de agua por hora
+# Restricción 17: Capacidad máxima del sistema de agua por hora
 m.addConstrs(
     (quicksum(X[n,r,t,d] for n in N for r in R) <= Dt[t]
      for t in T for d in D),
@@ -351,6 +346,21 @@ print("\nTodas las restricciones agregadas")
 
 # OPTIMIZAR ------------------------------------------------------------
 m.optimize()
+
+# Después de optimizar, agregar:
+print("\nValidación de solución:")
+for r in R:
+    for n in N:
+        for d in D:
+            if Y[r,n,d].X > 0:
+                print(f"Día {d}: {Y[r,n,d].X} regadores {r} en zona {n}")
+
+# Verificar consistencia con compras
+for r in R:
+    for n in N:
+        total_comprado = sum(V[r,n,d].X for d in D)
+        if total_comprado > 0:
+            print(f"Total comprado {r} para {n}: {total_comprado}")
 
 # RESULTADOS -----------------------------------------------------------
 if m.status == GRB.OPTIMAL:
